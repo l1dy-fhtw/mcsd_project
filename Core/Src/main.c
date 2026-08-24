@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "vl5310x_minimal.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -45,7 +45,8 @@ ADC_HandleTypeDef hadc1;
 I2C_HandleTypeDef hi2c1;
 
 /* USER CODE BEGIN PV */
-
+I2C_HandleTypeDef hi2c1;
+uint16_t distance_mm = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -94,7 +95,11 @@ int main(void)
   MX_ADC1_Init();
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
-
+  /* Initialize ToF Sensor */
+  if (VL53L0X_Init(&hi2c1) != HAL_OK) {
+	  /* Initialization Error (check pull-up resistors or address) */
+	  Error_Handler();
+  }
   /* USER CODE END 2 */
 
   /* Initialize leds */
@@ -106,7 +111,13 @@ int main(void)
   {
 
     /* USER CODE END WHILE */
+	/* Perform single-shot range reading */
+	if (VL53L0X_ReadDistance(&hi2c1, &distance_mm) == HAL_OK) {
+	  /* Valid range measured (distance_mm) */
+	  // -> Update LCD, calculate tank fill, or trigger tripwire logic here
+	}
 
+	HAL_Delay(100); /* 10 Hz sampling rate */
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
