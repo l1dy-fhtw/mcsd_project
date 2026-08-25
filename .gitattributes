@@ -1,15 +1,24 @@
-# Match CubeMX (macOS): generated trees use CRLF in the working copy.
-# Git stores LF; regenerating the same content should stay clean.
+# Match CubeMX (macOS) working-tree line endings so Generate stays clean.
 * text=auto
 
+# Application + MX-generated Core sources
 Core/**/*.c text eol=crlf
 Core/**/*.h text eol=crlf
-Drivers/** text eol=crlf
 
+# CubeMX rewrites these as CRLF
+Drivers/BSP/** text eol=crlf
+Drivers/CMSIS/Include/** text eol=crlf
+Drivers/STM32L4xx_HAL_Driver/** text eol=crlf
+
+# CubeMX leaves Device pack headers as LF
+Drivers/CMSIS/Device/** text eol=lf
+Drivers/CMSIS/LICENSE.txt text eol=lf
+
+*.mxproject text eol=crlf
 *.md text eol=lf
 *.ioc text eol=lf
 *.sh text eol=lf
 *.project text eol=lf
 *.cproject text eol=lf
-*.mxproject text eol=lf
 *.gitattributes text eol=lf
+.gitignore text eol=lf
