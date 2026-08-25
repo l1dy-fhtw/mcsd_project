@@ -2,7 +2,7 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : VL53L1X Continuous Potentiometer Mode Controller
+  * @brief          : VL53L1X Continuous Potentiometer Mode Controller + LCD
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "vl53l1x_driver.h"
+#include "lcd.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -58,8 +59,6 @@ static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 uint16_t Read_Potentiometer(void);
 uint8_t  Calculate_Pot_Percent(uint16_t adc_val);
-void     Update_LCD_Standard(uint16_t dist);
-void     Update_LCD_Debug(uint8_t pot, uint16_t dist);
 /* USER CODE END PFP */
 
 /* USER CODE BEGIN 0 */
@@ -82,16 +81,6 @@ uint16_t Read_Potentiometer(void) {
 uint8_t Calculate_Pot_Percent(uint16_t adc_val) {
     if (adc_val > 4095) adc_val = 4095;
     return (uint8_t)((adc_val * 100UL) / 4095UL);
-}
-
-/* Stub: Integrates with colleague's LCD driver */
-void Update_LCD_Standard(uint16_t dist) {
-    // LCD_SetCursor(0, 0); LCD_Print("Dist: %4u mm", dist);
-}
-
-/* Stub: Integrates with colleague's LCD Debug view */
-void Update_LCD_Debug(uint8_t pot, uint16_t dist) {
-    // LCD_SetCursor(0, 0); LCD_Print("DBG P:%3d%% D:%4u", pot, dist);
 }
 /* USER CODE END 0 */
 
@@ -123,6 +112,12 @@ int main(void)
       printf("[WARN] ADC Calibration Failed!\r\n");
   }
 
+  /* Initialize I2C LCD */
+  LCD_Init(&hi2c1);
+  LCD_Wake();
+  LCD_WriteLine(0, "System Starting ");
+  LCD_WriteLine(1, "VL53L1X Active  ");
+
   HAL_Delay(100);
 
   /* Initialize and Start Ranging */
@@ -132,6 +127,8 @@ int main(void)
       printf("[OK] Autonomous Ranging Started.\r\n\r\n");
   } else {
       printf("[FAIL] VL53L1X Init Error. Check hardware!\r\n");
+      LCD_WriteLine(0, "Sensor Error!   ");
+      LCD_WriteLine(1, "Check wiring.   ");
   }
   /* USER CODE END 2 */
 
@@ -152,17 +149,23 @@ int main(void)
           current_mode = MODE_LCD_DEBUG;
       }
 
-      /* Print Mode Transition Notification */
+      /* Print Mode Transition Notification & Update LCD Screen clearly */
       if (current_mode != last_mode) {
           switch (current_mode) {
               case MODE_UART_TEST:
                   printf("\r\n>>> Mode: [1] UART TEST MODE (0-33%%) <<<\r\n");
+                  LCD_WriteLine(0, "Mode: UART Test ");
+                  LCD_WriteLine(1, "Check Terminal  ");
                   break;
               case MODE_STANDARD_LCD:
                   printf("\r\n>>> Mode: [2] STANDARD LCD MODE (34-66%%) <<<\r\n");
+                  LCD_WriteLine(0, "Mode: Standard  ");
+                  LCD_WriteLine(1, "                ");
                   break;
               case MODE_LCD_DEBUG:
                   printf("\r\n>>> Mode: [3] LCD DEBUG MODE (67-100%%) <<<\r\n");
+                  LCD_WriteLine(0, "Mode: Debug     ");
+                  LCD_WriteLine(1, "                ");
                   break;
               default:
                   break;
@@ -183,10 +186,13 @@ int main(void)
                   /* Throttled UART output at 10 Hz (every 100ms) */
                   if (HAL_GetTick() - last_print_time >= 100) {
                       if (status == VL53L1X_OK) {
-                    	  printf("[TEST MODE] Pot: %3u%% (%4u) | Distance: %4u mm\r\n",
-								 pot_percent, raw_adc, distance_mm);
-						  last_print_time = HAL_GetTick();
-					  }
+                          printf("[TEST MODE] Pot: %3u%% (%4u) | Distance: %4u mm\r\n",
+                                 pot_percent, raw_adc, distance_mm);
+                      } else {
+                          printf("[TEST MODE] Pot: %3u%% (%4u) | Target Out of Bounds (%u mm)\r\n",
+                                 pot_percent, raw_adc, distance_mm);
+                      }
+                      last_print_time = HAL_GetTick();
                   }
                   break;
 
