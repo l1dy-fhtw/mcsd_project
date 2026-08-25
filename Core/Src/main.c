@@ -2,7 +2,7 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : VL53L1X Continuous Potentiometer Mode Controller + LCD
+  * @brief          : VL53L1X + LCD: SW1 measure/hold/sleep + pot debug modes
   ******************************************************************************
   * @attention
   *
@@ -12,6 +12,13 @@
   * This software is licensed under terms that can be found in the LICENSE file
   * in the root directory of this software component.
   * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  * Presentation (SW1): Ready → Live cm → Hold; 30 s idle → sleep; wake restores.
+  * Debug (potentiometer PA7 / ADC1_IN12):
+  *   0–33%  UART TEST  — stream pot + distance on VCP
+  *  34–66%  STANDARD   — normal LCD UI (scenarios above)
+  *  67–100% LCD DEBUG  — pot% + mm on LCD while Live/Hold
+  * SW1: PA3 pull-up, pressed = 0
   *
   ******************************************************************************
   */
@@ -29,16 +36,39 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-typedef enum {
-    MODE_NONE = 0,
-    MODE_UART_TEST,      /*  0% - 33%: Stream live distance to UART terminal */
-    MODE_STANDARD_LCD,  /* 34% - 66%: Feed distance to 16x2 I2C LCD */
-    MODE_LCD_DEBUG      /* 67% - 100%: LCD Diagnostic view */
-} AppMode_t;
+typedef enum
+{
+  ST_WAIT_INPUT = 0,
+  ST_READY,
+  ST_LIVE,
+  ST_HOLD,
+  ST_SLEEP
+} app_state_t;
+
+typedef enum
+{
+  MODE_UART_TEST = 0,   /*  0% - 33%: UART stream */
+  MODE_STANDARD_LCD,    /* 34% - 66%: presentation UI */
+  MODE_LCD_DEBUG        /* 67% - 100%: LCD debug layout */
+} PotMode_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define SW1_PIN        GPIO_PIN_3
+#define SW1_PORT       GPIOA
+#define DEBOUNCE_MS    20U
+#define TIMEOUT_MS     30000U
+#define CM_START       50
+#define CM_MIN         1
+#define CM_MAX         200
+#define CM_STEP        1
+#define CM_BLINK       40
+#define CM_PANIC       10
+#define BLINK_SLOW_MS  500U
+#define BLINK_FAST_MS  80U
+#define TOF_POLL_MS    500U
+#define UART_PRINT_MS  100U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -53,12 +83,14 @@ I2C_HandleTypeDef hi2c1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-uint16_t raw_adc = 0;
-uint8_t  pot_percent = 0;
-uint16_t distance_mm = 0;
-AppMode_t current_mode = MODE_NONE;
-AppMode_t last_mode = MODE_NONE;
-uint32_t last_print_time = 0;
+static int distance_cm = CM_START;
+static uint8_t tof_online = 0;
+static uint16_t raw_adc = 0;
+static uint8_t pot_percent = 0;
+static uint16_t distance_mm = 0;
+static PotMode_t pot_mode = MODE_STANDARD_LCD;
+static PotMode_t last_pot_mode = MODE_STANDARD_LCD;
+static uint32_t last_print_time = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -68,31 +100,251 @@ static void MX_ADC1_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
-uint16_t Read_Potentiometer(void);
-uint8_t  Calculate_Pot_Percent(uint16_t adc_val);
+static uint16_t Read_Potentiometer(void);
+static uint8_t  Calculate_Pot_Percent(uint16_t adc_val);
+static PotMode_t Pot_Mode_From_Percent(uint8_t percent);
+static int  distance_get_cm(void);
+static uint8_t sw1_edge(void);
+static void app_draw(app_state_t state, int cm, uint32_t left_s);
+static void app_on_sw1(app_state_t *state, uint8_t *was_hold);
+static void led_update(int cm, uint8_t sleep);
+static uint8_t tof_present(void);
+static uint8_t tof_connect(void);
+static void tof_read_live(void);
+static void distance_on_key(uint8_t key);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-/* Retarget printf to USART2 for Virtual COM Port */
-int __io_putchar(int ch) {
-    HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
-    return ch;
+int __io_putchar(int ch)
+{
+  HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
+  return ch;
 }
 
-/* Sample Potentiometer RV1 */
-uint16_t Read_Potentiometer(void) {
-    HAL_ADC_Start(&hadc1);
-    HAL_ADC_PollForConversion(&hadc1, 10);
-    uint16_t val = HAL_ADC_GetValue(&hadc1);
-    HAL_ADC_Stop(&hadc1);
-    return val;
+static uint16_t Read_Potentiometer(void)
+{
+  HAL_ADC_Start(&hadc1);
+  HAL_ADC_PollForConversion(&hadc1, 10);
+  uint16_t val = HAL_ADC_GetValue(&hadc1);
+  HAL_ADC_Stop(&hadc1);
+  return val;
 }
 
-/* Map 12-bit ADC (0 - 4095) to 0 - 100% */
-uint8_t Calculate_Pot_Percent(uint16_t adc_val) {
-    if (adc_val > 4095) adc_val = 4095;
-    return (uint8_t)((adc_val * 100UL) / 4095UL);
+static uint8_t Calculate_Pot_Percent(uint16_t adc_val)
+{
+  if (adc_val > 4095U)
+  {
+    adc_val = 4095U;
+  }
+  return (uint8_t)((adc_val * 100UL) / 4095UL);
+}
+
+static PotMode_t Pot_Mode_From_Percent(uint8_t percent)
+{
+  if (percent <= 33U)
+  {
+    return MODE_UART_TEST;
+  }
+  if (percent <= 66U)
+  {
+    return MODE_STANDARD_LCD;
+  }
+  return MODE_LCD_DEBUG;
+}
+
+static int distance_get_cm(void)
+{
+  return distance_cm;
+}
+
+static uint8_t tof_present(void)
+{
+  return (HAL_I2C_IsDeviceReady(&hi2c1, VL53L1X_I2C_ADDR, 1, 10) == HAL_OK) ? 1U : 0U;
+}
+
+static uint8_t tof_connect(void)
+{
+  if (VL53L1X_Init(&hi2c1) != VL53L1X_OK)
+  {
+    return 0;
+  }
+  if (VL53L1X_StartMeasurement(&hi2c1) != VL53L1X_OK)
+  {
+    return 0;
+  }
+  tof_online = 1;
+  return 1;
+}
+
+static void tof_read_live(void)
+{
+  uint16_t mm = 0;
+  int cm;
+
+  if (VL53L1X_IsDataReady(&hi2c1) == 0U)
+  {
+    return;
+  }
+  if (VL53L1X_GetDistance(&hi2c1, &mm) == VL53L1X_OK)
+  {
+    distance_mm = mm;
+    cm = (int)(mm / 10U);
+    if (cm < CM_MIN)
+    {
+      cm = CM_MIN;
+    }
+    if (cm > CM_MAX)
+    {
+      cm = CM_MAX;
+    }
+    distance_cm = cm;
+  }
+  (void)VL53L1X_ClearInterrupt(&hi2c1);
+}
+
+static void distance_on_key(uint8_t key)
+{
+  if (key == '1')
+  {
+    if (distance_cm > CM_MIN)
+    {
+      distance_cm -= CM_STEP;
+    }
+  }
+  else if (key == '2')
+  {
+    if (distance_cm < CM_MAX)
+    {
+      distance_cm += CM_STEP;
+    }
+  }
+}
+
+static uint8_t sw1_edge(void)
+{
+  static uint8_t last = 1;
+  static uint32_t t_change = 0;
+  uint8_t now;
+
+  now = (HAL_GPIO_ReadPin(SW1_PORT, SW1_PIN) == GPIO_PIN_SET) ? 1U : 0U;
+  if (now == last)
+  {
+    return 0;
+  }
+  if ((HAL_GetTick() - t_change) < DEBOUNCE_MS)
+  {
+    return 0;
+  }
+
+  t_change = HAL_GetTick();
+  last = now;
+  return (now == 0U) ? 1U : 0U;
+}
+
+static void app_draw(app_state_t state, int cm, uint32_t left_s)
+{
+  char line1[17];
+  char line2[17];
+
+  (void)sprintf(line2, "On: %lus", (unsigned long)left_s);
+
+  switch (state)
+  {
+    case ST_WAIT_INPUT:
+      LCD_WriteLine(0, "Waiting for");
+      LCD_WriteLine(1, "input device");
+      return;
+    case ST_READY:
+      LCD_WriteLine(0, "System Ready");
+      break;
+    case ST_LIVE:
+      (void)sprintf(line1, "Dist: %3d cm", cm);
+      LCD_WriteLine(0, line1);
+      break;
+    case ST_HOLD:
+      (void)sprintf(line1, "HOLD %3d cm", cm);
+      LCD_WriteLine(0, line1);
+      break;
+    default:
+      return;
+  }
+  LCD_WriteLine(1, line2);
+}
+
+static void app_on_sw1(app_state_t *state, uint8_t *was_hold)
+{
+  switch (*state)
+  {
+    case ST_WAIT_INPUT:
+      *state = ST_READY;
+      break;
+    case ST_SLEEP:
+      LCD_Wake();
+      *state = (*was_hold != 0U) ? ST_HOLD : ST_READY;
+      break;
+    case ST_READY:
+      *state = ST_LIVE;
+      break;
+    case ST_LIVE:
+      *state = ST_HOLD;
+      break;
+    case ST_HOLD:
+      *state = ST_LIVE;
+      break;
+    default:
+      break;
+  }
+}
+
+static void led_update(int cm, uint8_t sleep)
+{
+  static uint32_t t0 = 0;
+  static uint8_t on = 1;
+  uint32_t half_ms;
+
+  if (sleep != 0U)
+  {
+    BSP_LED_Off(LED_GREEN);
+    on = 0;
+    return;
+  }
+
+  if (cm > CM_BLINK)
+  {
+    BSP_LED_On(LED_GREEN);
+    on = 1;
+    return;
+  }
+
+  if (cm <= CM_PANIC)
+  {
+    half_ms = BLINK_FAST_MS / 2U;
+  }
+  else
+  {
+    uint32_t period_ms;
+
+    period_ms = BLINK_FAST_MS
+                + (uint32_t)(cm - CM_PANIC)
+                  * (BLINK_SLOW_MS - BLINK_FAST_MS)
+                  / (uint32_t)(CM_BLINK - CM_PANIC);
+    half_ms = period_ms / 2U;
+  }
+
+  if ((HAL_GetTick() - t0) >= half_ms)
+  {
+    t0 = HAL_GetTick();
+    on = (on != 0U) ? 0U : 1U;
+    if (on != 0U)
+    {
+      BSP_LED_On(LED_GREEN);
+    }
+    else
+    {
+      BSP_LED_Off(LED_GREEN);
+    }
+  }
 }
 /* USER CODE END 0 */
 
@@ -104,7 +356,14 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  app_state_t state = ST_WAIT_INPUT;
+  uint8_t was_hold = 0;
+  uint8_t key = 0;
+  uint32_t t_idle;
+  uint32_t t_tof_poll = 0;
+  uint32_t shown_s = 999U;
+  int shown_cm = -1;
+  app_state_t shown_state = ST_SLEEP;
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -130,31 +389,37 @@ int main(void)
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
   printf("\r\n=========================================\r\n");
-  printf("   VL53L1X Multi-Mode System Starting   \r\n");
+  printf("   VL53L1X + LCD (SW1 + pot debug)       \r\n");
   printf("=========================================\r\n");
 
-  /* Calibrate ADC */
-  if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) != HAL_OK) {
-      printf("[WARN] ADC Calibration Failed!\r\n");
+  if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) != HAL_OK)
+  {
+    printf("[WARN] ADC Calibration Failed!\r\n");
   }
 
-  /* Initialize I2C LCD */
   LCD_Init(&hi2c1);
   LCD_Wake();
-  LCD_WriteLine(0, "System Starting ");
-  LCD_WriteLine(1, "VL53L1X Active  ");
 
-  HAL_Delay(100);
+  t_idle = HAL_GetTick();
+  t_tof_poll = t_idle;
+  shown_s = 0U;
+  shown_cm = distance_get_cm();
 
-  /* Initialize and Start Ranging */
-  if (VL53L1X_Init(&hi2c1) == VL53L1X_OK) {
-      printf("[OK] VL53L1X Initialized successfully.\r\n");
-      VL53L1X_StartMeasurement(&hi2c1);
-      printf("[OK] Autonomous Ranging Started.\r\n\r\n");
-  } else {
-      printf("[FAIL] VL53L1X Init Error. Check hardware!\r\n");
-      LCD_WriteLine(0, "Sensor Error!   ");
-      LCD_WriteLine(1, "Check wiring.   ");
+  if ((tof_present() != 0U) && (tof_connect() != 0U))
+  {
+    state = ST_READY;
+    shown_state = ST_READY;
+    LCD_WriteLine(0, "System Ready");
+    LCD_WriteLine(1, "On: 30s");
+    printf("[OK] VL53L1X ready — System Ready\r\n");
+  }
+  else
+  {
+    state = ST_WAIT_INPUT;
+    shown_state = ST_WAIT_INPUT;
+    LCD_WriteLine(0, "Waiting for");
+    LCD_WriteLine(1, "input device");
+    printf("[WAIT] No VL53 ACK yet — waiting / SW1 skip\r\n");
   }
   /* USER CODE END 2 */
 
@@ -165,82 +430,157 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-      /* 1. Sample Potentiometer Position */
-      raw_adc = Read_Potentiometer();
-      pot_percent = Calculate_Pot_Percent(raw_adc);
+    /* Potentiometer debug layer (always sampled). */
+    raw_adc = Read_Potentiometer();
+    pot_percent = Calculate_Pot_Percent(raw_adc);
+    pot_mode = Pot_Mode_From_Percent(pot_percent);
 
-      /* 2. Determine Continuous Mode (0-33%, 34-66%, 67-100%) */
-      if (pot_percent <= 33) {
-          current_mode = MODE_UART_TEST;
-      } else if (pot_percent <= 66) {
-          current_mode = MODE_STANDARD_LCD;
-      } else {
-          current_mode = MODE_LCD_DEBUG;
+    if (pot_mode != last_pot_mode)
+    {
+      switch (pot_mode)
+      {
+        case MODE_UART_TEST:
+          printf("\r\n>>> Pot debug: [1] UART TEST (0-33%%) <<<\r\n");
+          break;
+        case MODE_STANDARD_LCD:
+          printf("\r\n>>> Pot debug: [2] STANDARD UI (34-66%%) <<<\r\n");
+          shown_state = ST_SLEEP; /* force LCD redraw for presentation UI */
+          break;
+        case MODE_LCD_DEBUG:
+          printf("\r\n>>> Pot debug: [3] LCD DEBUG (67-100%%) <<<\r\n");
+          break;
+        default:
+          break;
       }
+      last_pot_mode = pot_mode;
+    }
 
-      /* Print Mode Transition Notification & Update LCD Screen clearly */
-      if (current_mode != last_mode) {
-          switch (current_mode) {
-              case MODE_UART_TEST:
-                  printf("\r\n>>> Mode: [1] UART TEST MODE (0-33%%) <<<\r\n");
-                  LCD_WriteLine(0, "Mode: UART Test ");
-                  LCD_WriteLine(1, "Check Terminal  ");
-                  break;
-              case MODE_STANDARD_LCD:
-                  printf("\r\n>>> Mode: [2] STANDARD LCD MODE (34-66%%) <<<\r\n");
-                  LCD_WriteLine(0, "Mode: Standard  ");
-                  LCD_WriteLine(1, "                ");
-                  break;
-              case MODE_LCD_DEBUG:
-                  printf("\r\n>>> Mode: [3] LCD DEBUG MODE (67-100%%) <<<\r\n");
-                  LCD_WriteLine(0, "Mode: Debug     ");
-                  LCD_WriteLine(1, "                ");
-                  break;
-              default:
-                  break;
+    /* Scenario 1: SW1 Ready → Live → Hold (wake from sleep restores hold). */
+    if (sw1_edge() != 0U)
+    {
+      app_state_t before = state;
+
+      if (state != ST_WAIT_INPUT)
+      {
+        t_idle = HAL_GetTick();
+      }
+      app_on_sw1(&state, &was_hold);
+      shown_state = ST_SLEEP;
+
+      /* Resume ranging whenever we enter Live (incl. after sleep/hold). */
+      if ((state == ST_LIVE) && (tof_online != 0U) && (before != ST_LIVE))
+      {
+        (void)VL53L1X_StartMeasurement(&hi2c1);
+      }
+    }
+
+    /* Lab UART 1/2 only while ToF offline. */
+    if ((tof_online == 0U) && (HAL_UART_Receive(&huart2, &key, 1, 0) == HAL_OK))
+    {
+      if ((state == ST_LIVE) || (state == ST_READY))
+      {
+        distance_on_key(key);
+      }
+    }
+
+    /* Attach / detach VL53 on shared I2C1. */
+    if ((HAL_GetTick() - t_tof_poll) >= TOF_POLL_MS)
+    {
+      t_tof_poll = HAL_GetTick();
+      if (state == ST_WAIT_INPUT)
+      {
+        if ((tof_present() != 0U) && (tof_connect() != 0U))
+        {
+          state = ST_READY;
+          t_idle = HAL_GetTick();
+          shown_state = ST_SLEEP;
+          printf("[OK] VL53L1X connected — System Ready\r\n");
+        }
+      }
+      else if (tof_online != 0U)
+      {
+        if (tof_present() == 0U)
+        {
+          (void)VL53L1X_StopMeasurement(&hi2c1);
+          tof_online = 0;
+          if (state != ST_SLEEP)
+          {
+            LCD_Wake();
           }
-          last_mode = current_mode;
+          state = ST_WAIT_INPUT;
+          shown_state = ST_SLEEP;
+          printf("[WAIT] VL53 unplugged\r\n");
+        }
       }
-
-      /* 3. Check for Fresh Sensor Data */
-      if (VL53L1X_IsDataReady(&hi2c1)) {
-          VL53L1X_Status_t status = VL53L1X_GetDistance(&hi2c1, &distance_mm);
-
-          /* Clear interrupt to start next measurement cycle immediately */
-          VL53L1X_ClearInterrupt(&hi2c1);
-
-          /* Dispatch measurement to active mode */
-          switch (current_mode) {
-              case MODE_UART_TEST:
-                  /* Throttled UART output at 10 Hz (every 100ms) */
-                  if (HAL_GetTick() - last_print_time >= 100) {
-                      if (status == VL53L1X_OK) {
-                          printf("[TEST MODE] Pot: %3u%% (%4u) | Distance: %4u mm\r\n",
-                                 pot_percent, raw_adc, distance_mm);
-                      } else {
-                          printf("[TEST MODE] Pot: %3u%% (%4u) | Target Out of Bounds (%u mm)\r\n",
-                                 pot_percent, raw_adc, distance_mm);
-                      }
-                      last_print_time = HAL_GetTick();
-                  }
-                  break;
-
-              case MODE_STANDARD_LCD:
-                  if (status == VL53L1X_OK) {
-                      Update_LCD_Standard(distance_mm);
-                  }
-                  break;
-
-              case MODE_LCD_DEBUG:
-                  Update_LCD_Debug(pot_percent, (status == VL53L1X_OK) ? distance_mm : 0xFFFF);
-                  break;
-
-              default:
-                  break;
-          }
+      else if (tof_present() != 0U)
+      {
+        (void)tof_connect();
       }
+    }
 
-      HAL_Delay(10);
+    /* Scenario 2: live ranging refreshes cm. */
+    if ((tof_online != 0U) && (state == ST_LIVE))
+    {
+      tof_read_live();
+    }
+
+    /* Pot UART TEST: stream while Live (and hold uses last mm). */
+    if ((pot_mode == MODE_UART_TEST) && (state == ST_LIVE || state == ST_HOLD))
+    {
+      if ((HAL_GetTick() - last_print_time) >= UART_PRINT_MS)
+      {
+        printf("[TEST MODE] Pot: %3u%% (%4u) | Distance: %4u mm (%3d cm)\r\n",
+               pot_percent, raw_adc, distance_mm, distance_cm);
+        last_print_time = HAL_GetTick();
+      }
+    }
+
+    /* Scenario 3: 30 s idle → sleep (LCD off, stop ranging). */
+    if ((state != ST_SLEEP) && (state != ST_WAIT_INPUT))
+    {
+      if ((HAL_GetTick() - t_idle) >= TIMEOUT_MS)
+      {
+        was_hold = (state == ST_HOLD) ? 1U : 0U;
+        if (tof_online != 0U)
+        {
+          (void)VL53L1X_StopMeasurement(&hi2c1);
+        }
+        state = ST_SLEEP;
+        LCD_Sleep();
+        printf("[SLEEP] idle 30 s\r\n");
+      }
+    }
+
+    /* LCD: presentation UI, or debug overlay on Live/Hold. */
+    if (state != ST_SLEEP)
+    {
+      uint32_t left_s;
+      int cm;
+
+      left_s = (state == ST_WAIT_INPUT)
+                   ? 0U
+                   : (TIMEOUT_MS - (HAL_GetTick() - t_idle)) / 1000U;
+      cm = distance_get_cm();
+
+      if ((pot_mode == MODE_LCD_DEBUG) && ((state == ST_LIVE) || (state == ST_HOLD)))
+      {
+        Update_LCD_Debug(pot_percent, (tof_online != 0U) ? distance_mm : 0xFFFF);
+        shown_s = left_s;
+        shown_cm = cm;
+        shown_state = state;
+      }
+      else if ((left_s != shown_s) || (cm != shown_cm) || (state != shown_state))
+      {
+        app_draw(state, cm, left_s);
+        shown_s = left_s;
+        shown_cm = cm;
+        shown_state = state;
+      }
+    }
+
+    led_update(distance_get_cm(),
+               ((state == ST_SLEEP) || (state == ST_WAIT_INPUT)) ? 1U : 0U);
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -483,7 +823,11 @@ static void MX_GPIO_Init(void)
   HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-
+  /* SW1 on PA3 (pull-up, pressed = 0) — not in .ioc; keep in USER CODE */
+  GPIO_InitStruct.Pin = SW1_PIN;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(SW1_PORT, &GPIO_InitStruct);
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
