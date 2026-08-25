@@ -1,0 +1,15 @@
+# Match CubeMX (macOS): generated trees use CRLF in the working copy.
+# Git stores LF; regenerating the same content should stay clean.
+* text=auto
+
+Core/**/*.c text eol=crlf
+Core/**/*.h text eol=crlf
+Drivers/** text eol=crlf
+
+*.md text eol=lf
+*.ioc text eol=lf
+*.sh text eol=lf
+*.project text eol=lf
+*.cproject text eol=lf
+*.mxproject text eol=lf
+*.gitattributes text eol=lf
