@@ -208,9 +208,9 @@ nibble writes). Data-ready is polled in `VL53L1X_REG_INT_STATUS`.
 | Value | Name | Meaning |
 | ---: | --- | --- |
 | 0 | `VL53L1X_OK` | I2C succeeded and the sample is usable |
-| −1 | `VL53L1X_ERROR` | `HAL_I2C_Mem_*` failed (NACK, bus, timeout) |
-| −2 | `VL53L1X_TIMEOUT` | Boot bit in `SYS_STATUS` stayed 0 for >100 ms |
-| −3 | `VL53L1X_INVALID` | Chip ID mismatch, or range status not accepted |
+| -1 | `VL53L1X_ERROR` | `HAL_I2C_Mem_*` failed (NACK, bus, timeout) |
+| -2 | `VL53L1X_TIMEOUT` | Boot bit in `SYS_STATUS` stayed 0 for >100 ms |
+| -3 | `VL53L1X_INVALID` | Chip ID mismatch, or range status not accepted |
 
 ---
 
