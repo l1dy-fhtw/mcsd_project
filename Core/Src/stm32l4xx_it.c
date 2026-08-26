@@ -57,7 +57,7 @@
 /* External variables --------------------------------------------------------*/
 
 /* USER CODE BEGIN EV */
-
+void TIM7_TickHandler(void);   /* HAL time base, see stm32l4xx_hal_timebase_tim.c */
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -183,9 +183,8 @@ void PendSV_Handler(void)
 void SysTick_Handler(void)
 {
   /* USER CODE BEGIN SysTick_IRQn 0 */
-
+  /* Tick comes from TIM7 now, so SysTick stays disabled and does not wake __WFI. */
   /* USER CODE END SysTick_IRQn 0 */
-  HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
 
   /* USER CODE END SysTick_IRQn 1 */
@@ -213,5 +212,20 @@ void EXTI0_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+/**
+  * @brief This function handles TIM7 global interrupt (HAL 1 ms time base).
+  */
+void TIM7_IRQHandler(void)
+{
+  TIM7_TickHandler();
+}
 
+/**
+  * @brief This function handles EXTI line3 interrupt (SW1 on PA3).
+  */
+void EXTI3_IRQHandler(void)
+{
+  /* Wake source only: debounce and app logic stay in the main loop. */
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_3);
+}
 /* USER CODE END 1 */

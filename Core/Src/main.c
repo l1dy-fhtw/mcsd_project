@@ -18,7 +18,11 @@
   *   0–33%  UART TEST  — stream pot + distance on VCP
   *  34–66%  STANDARD   — normal LCD UI (scenarios above)
   *  67–100% LCD DEBUG  — pot% + mm on LCD while Live/Hold
-  * SW1: PA3 pull-up, pressed = 0
+  * SW1: PA3 pull-up, pressed = 0, EXTI3 falling (wake source)
+ * Power: TIM7 is the HAL tick (not SysTick); the loop idles in __WFI(). While
+ *        idling TIM7 becomes one coarse one-shot of up to 100 ms, so the CPU
+ *        wakes once per wait instead of every millisecond. In sleep the tick
+ *        is suspended entirely, leaving SW1 (EXTI3) as the only wake source.
   *
   ******************************************************************************
   */
@@ -69,6 +73,16 @@ typedef enum
 #define BLINK_FAST_MS  80U
 #define TOF_POLL_MS    500U
 #define UART_PRINT_MS  100U
+/*
+ * Idle cadence, i.e. how long the loop may sleep before it must look again.
+ * Every periodic job is covered by one of the two values:
+ *   LOOP_FAST_MS  LED blink (half period 40..250 ms) and ST_LIVE ranging
+ *   LOOP_IDLE_MS  UART_PRINT_MS 100, LCD refresh 500, TOF_POLL_MS 500,
+ *                 countdown 1 s, pot mode change; SW1 never waits, EXTI3
+ *                 cuts the sleep short.
+ */
+#define LOOP_FAST_MS   10U
+#define LOOP_IDLE_MS   100U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -91,6 +105,7 @@ static uint16_t distance_mm = 0;
 static PotMode_t pot_mode = MODE_STANDARD_LCD;
 static PotMode_t last_pot_mode = MODE_STANDARD_LCD;
 static uint32_t last_print_time = 0;
+static volatile uint8_t sw1_wake = 0;   /* EXTI3 seen: skip __WFI so no press is lost */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -108,6 +123,7 @@ static uint8_t sw1_edge(void);
 static void app_draw(app_state_t state, int cm, uint32_t left_s);
 static void app_on_sw1(app_state_t *state, uint8_t *was_hold);
 static void led_update(int cm, uint8_t sleep);
+static uint32_t loop_idle_ms(app_state_t state, int cm);
 static uint8_t tof_present(void);
 static uint8_t tof_connect(void);
 static void tof_read_live(void);
@@ -228,6 +244,15 @@ static void distance_on_key(uint8_t key)
     {
       distance_cm += CM_STEP;
     }
+  }
+}
+
+/* Wake source only: debounce and the state machine stay in the main loop. */
+void HAL_GPIO_EXTI_Callback(uint16_t pin)
+{
+  if (pin == SW1_PIN)
+  {
+    sw1_wake = 1;
   }
 }
 
@@ -368,6 +393,20 @@ static void led_update(int cm, uint8_t sleep)
       BSP_LED_Off(LED_GREEN);
     }
   }
+}
+
+/* How long the loop may sleep: only a blinking LED or live ranging need speed. */
+static uint32_t loop_idle_ms(app_state_t state, int cm)
+{
+  if (state == ST_LIVE)
+  {
+    return LOOP_FAST_MS;
+  }
+  if ((state != ST_SLEEP) && (state != ST_WAIT_INPUT) && (cm <= CM_BLINK))
+  {
+    return LOOP_FAST_MS;   /* led_update() is toggling */
+  }
+  return LOOP_IDLE_MS;
 }
 /* USER CODE END 0 */
 
@@ -673,7 +712,27 @@ int main(void)
     led_update(distance_get_cm(),
                ((state == ST_SLEEP) || (state == ST_WAIT_INPUT)) ? 1U : 0U);
 
-    HAL_Delay(10);
+    /* Idle instead of spinning in HAL_Delay. LCD off: SW1 only, so the TIM7
+       tick stops too (it would just wake the CPU for nothing). */
+    if (state == ST_SLEEP)
+    {
+      HAL_SuspendTick();
+      __disable_irq();
+      if (sw1_wake == 0U)
+      {
+        __WFI();      /* a pending EXTI3 still wakes us with PRIMASK set */
+      }
+      sw1_wake = 0;
+      __enable_irq(); /* let the EXTI3 handler run */
+      HAL_ResumeTick(); /* tick back before the next HAL_GetTick user */
+    }
+    else
+    {
+      /* One coarse TIM7 one-shot for the whole wait, so the CPU wakes once
+         instead of every millisecond. EXTI3 still returns immediately. */
+      sw1_wake = 0;
+      HAL_TickSleep(loop_idle_ms(state, distance_get_cm()));
+    }
 
     /* USER CODE END WHILE */
 
@@ -919,9 +978,14 @@ static void MX_GPIO_Init(void)
   /* USER CODE BEGIN MX_GPIO_Init_2 */
   /* SW1 on PA3 (pull-up, pressed = 0) — not in .ioc; keep in USER CODE */
   GPIO_InitStruct.Pin = SW1_PIN;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(SW1_PORT, &GPIO_InitStruct);
+
+  /* SW1 is the only wake source while the LCD sleeps; ISR just clears the flag.
+     Below EXTI0/tick priority so it cannot cut into an LCD I2C nibble write. */
+  HAL_NVIC_SetPriority(EXTI3_IRQn, 1, 0);
+  HAL_NVIC_EnableIRQ(EXTI3_IRQn);
 
   /*
    * Project_LCD has no PB0 EXTI. VL53 GPIO1/INT on the Click often lands on

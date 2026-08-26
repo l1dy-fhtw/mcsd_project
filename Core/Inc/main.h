@@ -55,7 +55,8 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-
+/* stm32l4xx_hal_timebase_tim.c: coarse one-shot idle instead of 1 ms wake-ups. */
+void HAL_TickSleep(uint32_t ms);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
