@@ -169,7 +169,8 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef* hi2c)
   if(hi2c->Instance==I2C1)
   {
     /* USER CODE BEGIN I2C1_MspInit 0 */
-
+    /* CubeMX must generate AF open-drain + GPIO_PULLUP on PB6 (SCL) / PB7 (SDA).
+     * I2C is open-drain; without pull-ups the shared LCD + VL53 bus stays low. */
     /* USER CODE END I2C1_MspInit 0 */
 
   /** Initializes the peripherals clock

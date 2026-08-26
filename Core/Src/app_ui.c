@@ -1,6 +1,11 @@
 /**
  * @file    app_ui.c
  * @brief   SW1 debounce/state, LCD paint, LED blink, sleep WFI
+ *
+ * One SW1 press: Ready→Live, Live→Hold, Hold→Live. From Sleep, LCD_Wake()
+ * then Hold or Ready (was_hold). Hold shows frozen centimetres, not a live
+ * millimetre I2C sample. In STANDARD Live, Update_LCD_Standard writes line 0;
+ * this file writes the "On: Ns" countdown on line 1.
  */
 #include "app_ui.h"
 #include "distance_app.h"
@@ -14,6 +19,7 @@
 
 static volatile uint8_t sw1_wake = 0;
 
+/* EXTI3 from SW1: only sets a flag so ST_SLEEP can leave __WFI(). */
 void HAL_GPIO_EXTI_Callback(uint16_t pin)
 {
   if (pin == SW1_PIN)
@@ -43,6 +49,8 @@ static uint8_t sw1_falling_edge(void)
   return (now == 0U) ? 1U : 0U;
 }
 
+/* One debounced falling edge. Sleep restores Hold if was_hold, else Ready.
+ * LCD_Wake() turns the panel on; app_paint redraws the two lines. */
 uint8_t app_sw1_poll(app_state_t *state, uint8_t *was_hold)
 {
   if (sw1_falling_edge() == 0U)
@@ -74,6 +82,8 @@ uint8_t app_sw1_poll(app_state_t *state, uint8_t *was_hold)
   return 1;
 }
 
+/* Pot bands: 0–33% UART TEST, 34–66% STANDARD, 67–100% LCD DEBUG.
+ * SW1 still runs in all three; LCD DEBUG only changes what is painted. */
 void app_on_pot_mode_change(PotMode_t mode, app_state_t state,
                             uint32_t *shown_s, int *shown_cm,
                             app_state_t *shown_state)
@@ -102,6 +112,7 @@ void app_on_pot_mode_change(PotMode_t mode, app_state_t state,
       uart_console_reset_line();
       if (state != ST_SLEEP)
       {
+        /* Line 0 = hint; line 1 = last committed text. Not updated per key. */
         LCD_WriteLine(0, "Type UART 115200");
         LCD_WriteLine(1, uart_console_msg());
         *shown_state = state;
@@ -112,6 +123,8 @@ void app_on_pot_mode_change(PotMode_t mode, app_state_t state,
   }
 }
 
+/* STANDARD Ready / Hold / wait screens. Hold uses distance_cm_get() — the
+ * frozen centimetre, not a fresh millimetre sample. Line 1 is the idle countdown. */
 static void app_draw(app_state_t state, int cm, uint32_t left_s)
 {
   char line1[17];
@@ -155,6 +168,9 @@ static void app_draw(app_state_t state, int cm, uint32_t left_s)
   LCD_WriteLine(1, line2);
 }
 
+/* STANDARD Live: Update_LCD_Standard writes line 0 (cm); this writes line 1
+ * "On: Ns". LCD DEBUG: line 0 is the hint, line 1 the last Enter — skip while
+ * the user is still typing (uart_console writes the LCD on Enter). */
 void app_paint(app_state_t state, PotMode_t mode, uint32_t t_idle,
                uint32_t *shown_s, int *shown_cm, app_state_t *shown_state)
 {
@@ -293,6 +309,8 @@ uint32_t app_idle_ms(app_state_t state)
   return LOOP_IDLE_MS;
 }
 
+/* MCU Sleep (clocks up, RAM kept) — not STM32 Stop/Standby. Hold and LCD
+ * DDRAM stay in RAM. Tick off so only SW1 EXTI3 wakes the CPU. */
 void app_wait_sleep(void)
 {
   HAL_SuspendTick();

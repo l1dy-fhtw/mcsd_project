@@ -3,8 +3,12 @@
  * @brief   USART2 RX ring + LCD DEBUG line editor + VCP printf glue
  *
  * USART2 has no RX FIFO. At 115200 baud a byte must be taken within ~87 us,
- * which is far shorter than HAL_TickSleep() (up to 100 ms). Reception is
- * interrupt-driven; the ISR also wakes __WFI so a keystroke is not delayed.
+ * which is far shorter than HAL_TickSleep() (up to 100 ms). Polling
+ * HAL_UART_Receive in the loop would drop keys. Reception is interrupt-driven
+ * into a 64-byte ring; the ISR also wakes __WFI so a keystroke is not delayed.
+ *
+ * LCD DEBUG: characters are echoed on the VCP only. The LCD is written when
+ * Enter commits the line (LCD_WriteLine on row 1), not on every key.
  */
 #include "uart_console.h"
 #include "distance_app.h"
@@ -50,6 +54,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     return;
   }
 
+  /* Store one byte; main later pops from the ring. Re-arm immediately. */
   next = (rx_head + 1U) & (RX_RING_SIZE - 1U);
   if (next != rx_tail)
   {
@@ -95,7 +100,7 @@ const char *uart_console_msg(void)
   return uart_msg;
 }
 
-/* 1 = Enter committed uart_msg (LCD should be written). Echo is VCP-only. */
+/* Typing: printf to VCP only. Return 1 on Enter so the caller can write LCD. */
 static uint8_t lcd_uart_key(uint8_t c)
 {
   if ((c == '\r') || (c == '\n'))
@@ -141,6 +146,7 @@ void uart_console_poll(app_state_t state, PotMode_t mode, uint32_t *t_idle)
 
     if (mode == MODE_LCD_DEBUG)
     {
+      /* Enter → LCD row 1. Keys while composing stay on the terminal. */
       if ((lcd_uart_key(key) != 0U) && (state != ST_SLEEP))
       {
         LCD_WriteLine(1, uart_msg);

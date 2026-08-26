@@ -120,6 +120,9 @@ int main(void)
   MX_I2C1_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  /* I2C1 (PB6 SCL / PB7 SDA, open-drain + pull-up in MSP) is shared by the
+   * LCD backpack and the VL53L1X. MX_I2C1_Init() already ran; LCD_Init needs
+   * that handle. Two slaves on one bus: never overlap LCD nibbles with ToF. */
   uart_console_start();
 
   printf("\r\n=========================================\r\n");
@@ -150,6 +153,7 @@ int main(void)
   }
 
   LCD_Init(&hi2c1);
+  /* Probe is already done inside LCD_Init (0x27 then 0x3F); this is VCP only. */
   if (HAL_I2C_IsDeviceReady(&hi2c1, (uint16_t)(0x27U << 1), 1, 50) == HAL_OK)
   {
     printf("[OK] LCD ACK at 0x27\r\n");
@@ -229,6 +233,9 @@ int main(void)
     if ((state != ST_SLEEP) && (state != ST_WAIT_INPUT)
         && ((HAL_GetTick() - t_idle) >= TIMEOUT_MS))
     {
+      /* 30 s idle: stop ranging, remember Hold, LCD display/backlight off.
+       * DDRAM and was_hold stay in RAM. Next loop uses app_wait_sleep() —
+       * MCU Sleep + __WFI, not Stop/Standby, so wake can restore Hold. */
       was_hold = (state == ST_HOLD) ? 1U : 0U;
       tof_stop();
       state = ST_SLEEP;
@@ -241,6 +248,7 @@ int main(void)
 
     if (state == ST_SLEEP)
     {
+      /* Tick suspended; only EXTI3 (SW1) wakes. Not Stop/Standby. */
       app_wait_sleep();
     }
     else
@@ -373,7 +381,7 @@ static void MX_I2C1_Init(void)
 {
 
   /* USER CODE BEGIN I2C1_Init 0 */
-
+  /* Fast Mode, 7-bit. Pins (open-drain + pull-up) are in HAL_I2C_MspInit. */
   /* USER CODE END I2C1_Init 0 */
 
   /* USER CODE BEGIN I2C1_Init 1 */
@@ -506,6 +514,7 @@ static void MX_GPIO_Init(void)
    * Project_LCD has no PB0 EXTI. VL53 GPIO1/INT on the Click often lands on
    * PB0 — EXTI0 at priority 0 can preempt mid-LCD I2C nibble writes and leave
    * the HD44780 desynced (garbage glyphs). Driver polls INT via I2C registers.
+   * Keep EXTI0 off for the whole run, not only "during" LCD writes.
    */
   HAL_NVIC_DisableIRQ(EXTI0_IRQn);
   /* USER CODE END MX_GPIO_Init_2 */
