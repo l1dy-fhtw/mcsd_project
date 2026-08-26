@@ -7,6 +7,7 @@
  *
  * Funduino backpack map: P0=RS, P1=RW(0), P2=EN, P3=BL, P4..P7=data.
  * EN pulse matches LiquidCrystal_I2C: data (EN=0) -> EN high -> EN low.
+ * Each nibble is three I2C bytes; HAL_Delay is used only in Init / clear.
  ******************************************************************************
  */
 #include "lcd.h"
@@ -23,7 +24,7 @@ static I2C_HandleTypeDef *lcd_hi2c = 0;
 static uint8_t lcd_addr = LCD_ADDR_27;
 static uint8_t lcd_bl = LCD_BL;
 
-/* ~1 us busy-wait @ 32 MHz (SYSCLK); enough for EN pulse / settle. */
+/* ~1 us busy-wait @ SYSCLK; enough for EN pulse / nibble settle. */
 static void lcd_delay_us(uint32_t us)
 {
   uint32_t cycles = us * (SystemCoreClock / 1000000U);
@@ -43,17 +44,17 @@ static HAL_StatusTypeDef lcd_i2c(uint8_t data)
   return HAL_I2C_Master_Transmit(lcd_hi2c, lcd_addr, &data, 1, LCD_I2C_TO);
 }
 
-/* LiquidCrystal_I2C-compatible nibble: set data, pulse EN high then low. */
+/* One 4-bit write: present data, pulse EN high (>450 ns), falling edge latches. */
 static void lcd_nibble(uint8_t nibble, uint8_t rs)
 {
   uint8_t data = (uint8_t)((nibble & 0xF0U) | lcd_bl | rs);
 
-  (void)lcd_i2c(data);                 /* EN=0, data valid */
+  (void)lcd_i2c(data);
   lcd_delay_us(1);
   (void)lcd_i2c((uint8_t)(data | LCD_EN));
-  lcd_delay_us(1);                     /* EN high > 450 ns */
-  (void)lcd_i2c(data);                 /* EN falling edge latches */
-  lcd_delay_us(50);                    /* HD44780 needs >37 us */
+  lcd_delay_us(1);
+  (void)lcd_i2c(data);
+  lcd_delay_us(50);                    /* HD44780 needs >37 us after a nibble */
 }
 
 static void lcd_byte(uint8_t value, uint8_t rs)
@@ -67,7 +68,7 @@ static void lcd_cmd(uint8_t cmd)
   lcd_byte(cmd, 0);
   if ((cmd == 0x01U) || (cmd == 0x02U))
   {
-    HAL_Delay(2);
+    HAL_Delay(2);                      /* clear / home need extra time */
   }
 }
 
@@ -98,7 +99,7 @@ void LCD_Init(I2C_HandleTypeDef *hi2c)
   lcd_bl = LCD_BL;
   HAL_Delay(50);
 
-  /* HD44780 4-bit boot sequence (datasheet). */
+  /* HD44780 4-bit boot sequence (datasheet, still in 8-bit until 0x20). */
   lcd_nibble(0x30, 0);
   HAL_Delay(5);
   lcd_nibble(0x30, 0);

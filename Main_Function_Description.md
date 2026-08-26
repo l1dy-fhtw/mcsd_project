@@ -17,8 +17,10 @@ When the device is turned on, the modules are initialized. The microcontroller i
 ### Scenario 1 — SW1 interaction (ready → measure → hold)
 
 When the user presses **SW1** the first time, the LCD remains/turns on in the ready state.  
-When the user presses SW1 a **second** time, the system starts continuous distance measurement: the VL53L1X sends measured millimetre values over I2C to the microcontroller, which converts them to centimetres and shows them on the LCD.  
-Pressing SW1 a **third** time freezes (**holds**) the current distance on the display while the LCD stays on. Pressing SW1 again leaves hold and returns to live measurement.
+When the user presses SW1 a **second** time, the system starts continuous distance measurement: the VL53L1X sends measured millimetre values over I2C to the microcontroller, which converts them to centimetres (clamped to **1…500 cm**, covering typical long-range ToF) and shows them on the LCD.  
+Pressing SW1 a **third** time freezes (**holds**) the current centimetre value on the display while the LCD stays on. Pressing SW1 again leaves hold and returns to live measurement.
+
+Driver functions (parameters, returns, HAL/I2C) are listed in [Driver_API_Reference.md](Driver_API_Reference.md) (exportable to PDF).
 
 **Presentation demo:** press SW1 repeatedly to cycle Ready → Live distance → Hold → Live …
 
@@ -84,7 +86,7 @@ flowchart LR
 | MCU → LD3 | GPIO (Nucleo green LED) | Optional visual feedback tied to measured distance while awake. |
 | MCU ↔ PC (lab/debug) | USART2 VCP (PA2/PA15) | Optional UART prints; not required for the three presentation scenarios above. |
 
-Shared **I2C1** is the main sensor/display bus: the application polls or reads the ToF sensor and writes LCD updates without a separate display bus. SysTick / `HAL_GetTick()` provides the 30 s idle timeout and the on-time countdown shown on the LCD.
+Shared **I2C1** is the main sensor/display bus: the application polls or reads the ToF sensor and writes LCD updates without a separate display bus. TIM7 (via `HAL_GetTick()`) provides the 30 s idle timeout and the on-time countdown shown on the LCD. See [Timebase_and_LowPower_Analysis.md](Timebase_and_LowPower_Analysis.md).
 
 ## Potentiometer debug modes (always available)
 

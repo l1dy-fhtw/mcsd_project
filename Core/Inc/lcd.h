@@ -5,31 +5,56 @@
 
 /**
  * @file lcd.h
- * @brief Public API for 16x2 HD44780 LCD via PCF8574 I2C backpack.
+ * @brief Public API for a 16x2 HD44780 LCD on a PCF8574 I2C backpack.
  *
- * HOW: one module (lcd.h + lcd.c), same pattern as vl53l1x_driver.
- * WHY: Dani #include "lcd.h" and calls Update_LCD_*; main keeps the state machine.
- *
- * Wiring: SDA = PB7 (D4), SCL = PB6 (D5), same I2C1 as VL53L1X.
- * Backpack ACK at 7-bit 0x27 or 0x3F (HAL uses << 1).
+ * Wiring: SDA = PB7 (D4), SCL = PB6 (D5), I2C1 shared with the VL53L1X.
+ * Backpack ACK at 7-bit 0x27 or 0x3F (HAL uses the 8-bit address << 1).
+ * CubeMX: I2C1 Fast Mode, PB6/PB7 open-drain with GPIO_PULLUP.
  */
 
-/* Probe backpack, 4-bit HD44780 init. HAL_Delay only here (boot timing). */
+/**
+ * @brief Probe the backpack and run the HD44780 4-bit boot sequence.
+ * @param hi2c  I2C1 handle already initialised by MX_I2C1_Init().
+ * @retval None  Failures are silent; later writes time out inside HAL.
+ *
+ * HAL: HAL_I2C_IsDeviceReady (0x27 then 0x3F), then HAL_I2C_Master_Transmit
+ * for each nibble. Uses HAL_Delay only for datasheet boot waits.
+ */
 void LCD_Init(I2C_HandleTypeDef *hi2c);
 
-/* Display off + backlight pin 0. Used for 30 s idle sleep. */
+/**
+ * @brief Display off, backlight pin 0. Used for the 30 s idle sleep.
+ * @retval None
+ */
 void LCD_Sleep(void);
 
-/* Backlight on, display on, cursor off. */
+/**
+ * @brief Backlight on, display on, cursor off. Used on SW1 wake.
+ * @retval None
+ */
 void LCD_Wake(void);
 
-/* Write exactly 16 characters so the previous text is fully replaced. */
+/**
+ * @brief Write exactly 16 characters to one row (pads/truncates with spaces).
+ * @param row  0 = top line (DDRAM 0x80), 1 = bottom line (DDRAM 0xC0).
+ * @param s    NUL-terminated string; NULL is treated as empty.
+ * @retval None
+ */
 void LCD_WriteLine(uint8_t row, const char *s);
 
-/* Dani API: millimetres in → "Dist: xxx cm" on line 0. */
+/**
+ * @brief Presentation line 0: millimetres in, "Dist: xxx cm" out.
+ * @param dist  Range in millimetres (clamped to 0..999 cm on the LCD).
+ * @retval None
+ */
 void Update_LCD_Standard(uint16_t dist);
 
-/* Dani API: pot percent + raw mm (debug layout, two lines). */
+/**
+ * @brief Two-line debug layout (kept as Dani's published API; unused by main).
+ * @param pot   Potentiometer percent 0..100.
+ * @param dist  Range in millimetres (clamped to 9999 on the LCD).
+ * @retval None
+ */
 void Update_LCD_Debug(uint8_t pot, uint16_t dist);
 
 #endif /* LCD_H */
