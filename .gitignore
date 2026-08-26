@@ -1,2 +1,5 @@
 Debug/
 .osx.project
+
+# CubeIDE debug configuration: local to one machine (absolute paths inside).
+*.launch

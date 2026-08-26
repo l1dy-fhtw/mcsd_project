@@ -83,6 +83,8 @@ typedef enum
  */
 #define LOOP_FAST_MS   10U
 #define LOOP_IDLE_MS   100U
+#define RX_RING_SIZE   64U   /* power of two: index wrap is a mask */
+#define LCD_COLS       16U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -106,6 +108,22 @@ static PotMode_t pot_mode = MODE_STANDARD_LCD;
 static PotMode_t last_pot_mode = MODE_STANDARD_LCD;
 static uint32_t last_print_time = 0;
 static volatile uint8_t sw1_wake = 0;   /* EXTI3 seen: skip __WFI so no press is lost */
+
+/*
+ * USART2 receive ring. USART2 has no RX FIFO, so at 115200 baud a byte has to
+ * be taken within ~87 us — far shorter than the up to 100 ms the loop sleeps in
+ * HAL_TickSleep(). Reception is therefore interrupt driven, and the interrupt
+ * doubles as a wake source so a keystroke returns from __WFI at once.
+ */
+static uint8_t rx_byte = 0;                     /* staging cell for HAL_UART_Receive_IT */
+static volatile uint8_t rx_ring[RX_RING_SIZE];
+static volatile uint32_t rx_head = 0;           /* written by the ISR */
+static volatile uint32_t rx_tail = 0;           /* written by the main loop */
+
+/* Text typed in the LCD DEBUG pot mode. */
+static char uart_line[LCD_COLS + 1] = "";       /* being typed, echoed on the VCP only */
+static uint8_t uart_line_len = 0;
+static char uart_msg[LCD_COLS + 1] = "";        /* last line committed with Enter */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -129,6 +147,10 @@ static uint8_t tof_connect(void);
 static void tof_read_live(void);
 static void tof_ensure_ranging(void);
 static void distance_on_key(uint8_t key);
+static void uart_rx_start(void);
+static uint8_t uart_rx_pop(uint8_t *byte);
+static void lcd_uart_reset(void);
+static uint8_t lcd_uart_key(uint8_t c);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -137,6 +159,57 @@ int __io_putchar(int ch)
 {
   HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
   return ch;
+}
+
+static void uart_rx_start(void)
+{
+  (void)HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
+}
+
+/* One byte arrived: park it and re-arm before the next one can overrun. */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  uint32_t next;
+
+  if (huart->Instance != USART2)
+  {
+    return;
+  }
+
+  next = (rx_head + 1U) & (RX_RING_SIZE - 1U);
+  if (next != rx_tail)   /* full ring: drop rather than overwrite unread input */
+  {
+    rx_ring[rx_head] = rx_byte;
+    rx_head = next;
+  }
+  uart_rx_start();
+}
+
+/* Without this a single overrun (typing while the CPU is busy) would stop RX. */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance != USART2)
+  {
+    return;
+  }
+
+  __HAL_UART_CLEAR_OREFLAG(huart);
+  __HAL_UART_CLEAR_NEFLAG(huart);
+  __HAL_UART_CLEAR_FEFLAG(huart);
+  __HAL_UART_CLEAR_PEFLAG(huart);
+  uart_rx_start();
+}
+
+static uint8_t uart_rx_pop(uint8_t *byte)
+{
+  if (rx_tail == rx_head)
+  {
+    return 0;
+  }
+
+  *byte = rx_ring[rx_tail];
+  rx_tail = (rx_tail + 1U) & (RX_RING_SIZE - 1U);
+  return 1;
 }
 
 static uint16_t Read_Potentiometer(void)
@@ -395,6 +468,54 @@ static void led_update(int cm, uint8_t sleep)
   }
 }
 
+/* Drop a half-typed line, e.g. when the pot re-enters LCD DEBUG. */
+static void lcd_uart_reset(void)
+{
+  uart_line[0] = '\0';
+  uart_line_len = 0;
+}
+
+/**
+  * @brief  Feed one received character to the LCD DEBUG line editor.
+  * @param  c  Byte from the UART ring.
+  * @retval 1 when Enter committed a line into uart_msg, 0 otherwise.
+  *
+  * The line being typed is echoed on the VCP only; the LCD is written once per
+  * Enter so a blocking I2C update does not run on every keystroke.
+  */
+static uint8_t lcd_uart_key(uint8_t c)
+{
+  if ((c == '\r') || (c == '\n'))
+  {
+    (void)strncpy(uart_msg, uart_line, sizeof(uart_msg));
+    uart_msg[sizeof(uart_msg) - 1U] = '\0';
+    lcd_uart_reset();
+    printf("\r\n[LCD] %s\r\n> ", uart_msg);
+    return 1;
+  }
+
+  if ((c == '\b') || (c == 0x7FU))
+  {
+    if (uart_line_len > 0U)
+    {
+      uart_line_len--;
+      uart_line[uart_line_len] = '\0';
+      printf("\b \b");
+    }
+    return 0;
+  }
+
+  if ((c >= 0x20U) && (c < 0x7FU) && (uart_line_len < LCD_COLS))
+  {
+    uart_line[uart_line_len] = (char)c;
+    uart_line_len++;
+    uart_line[uart_line_len] = '\0';
+    printf("%c", (char)c);
+  }
+
+  return 0;   /* over 16 chars or a control code: ignore, the LCD row is full */
+}
+
 /* How long the loop may sleep: only a blinking LED or live ranging need speed. */
 static uint32_t loop_idle_ms(app_state_t state, int cm)
 {
@@ -450,6 +571,8 @@ int main(void)
   MX_I2C1_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  uart_rx_start();   /* lab 1/2 keys and the LCD DEBUG text entry both read this ring */
+
   printf("\r\n=========================================\r\n");
   printf("   VL53L1X + LCD (SW1 + pot debug)       \r\n");
   printf("=========================================\r\n");
@@ -541,8 +664,16 @@ int main(void)
           break;
         case MODE_LCD_DEBUG:
           printf("\r\n>>> Pot debug: [3] LCD DEBUG (67-100%%) <<<\r\n");
-          shown_cm = -1; /* force throttled debug redraw */
-          shown_s = 999U;
+          printf("Type text at 115200 8N1 and press Enter.\r\n");
+          printf("The line then appears on LCD row 2 (max %u chars).\r\n> ",
+                 (unsigned)LCD_COLS);
+          lcd_uart_reset();   /* stale half-typed line from a previous visit */
+          if (state != ST_SLEEP)
+          {
+            LCD_WriteLine(0, "Type UART 115200");
+            LCD_WriteLine(1, uart_msg);
+            shown_state = state;   /* already painted: no repaint below */
+          }
           break;
         default:
           break;
@@ -577,10 +708,25 @@ int main(void)
       }
     }
 
-    /* Lab UART 1/2 only while ToF offline. */
-    if ((tof_online == 0U) && (HAL_UART_Receive(&huart2, &key, 1, 0) == HAL_OK))
+    /*
+     * Drain everything the RX interrupt collected. LCD DEBUG owns the keyboard
+     * when selected; otherwise the lab 1/2 keys work while the ToF is offline.
+     */
+    while (uart_rx_pop(&key) != 0U)
     {
-      if ((state == ST_LIVE) || (state == ST_READY))
+      if (state != ST_SLEEP)
+      {
+        t_idle = HAL_GetTick();   /* typing is user activity: do not sleep mid-line */
+      }
+
+      if (pot_mode == MODE_LCD_DEBUG)
+      {
+        if ((lcd_uart_key(key) != 0U) && (state != ST_SLEEP))
+        {
+          LCD_WriteLine(1, uart_msg);   /* Enter: commit the line */
+        }
+      }
+      else if ((tof_online == 0U) && ((state == ST_LIVE) || (state == ST_READY)))
       {
         distance_on_key(key);
       }
@@ -645,12 +791,24 @@ int main(void)
     }
 
     /*
+     * LCD DEBUG owns both rows: row 0 is the fixed hint, row 1 is whatever was
+     * last committed with Enter. Nothing periodic here — the drain loop writes
+     * row 1 — so this only repaints after a state change, e.g. waking from sleep.
+     */
+    if ((pot_mode == MODE_LCD_DEBUG) && (state != ST_SLEEP) && (shown_state != state))
+    {
+      LCD_WriteLine(0, "Type UART 115200");
+      LCD_WriteLine(1, uart_msg);
+      shown_state = state;
+    }
+
+    /*
      * LCD: same idea as Project_LCD + old pot path.
      * - UART TEST: banner only (written on mode entry)
-     * - LCD DEBUG + Live/Hold: Update_LCD_Debug on change, slow
-     * - else presentation app_draw on state / second / cm change
+     * - LCD DEBUG: handled above
+     * - STANDARD: presentation app_draw on state / second / cm change
      */
-    if ((state != ST_SLEEP) && (pot_mode != MODE_UART_TEST))
+    if ((state != ST_SLEEP) && (pot_mode == MODE_STANDARD_LCD))
     {
       uint32_t left_s;
       uint32_t elapsed;
@@ -672,17 +830,7 @@ int main(void)
       {
         t_lcd = HAL_GetTick();
 
-        if ((pot_mode == MODE_LCD_DEBUG) && ((state == ST_LIVE) || (state == ST_HOLD)))
-        {
-          if ((cm != shown_cm) || (state != shown_state) || (pot_percent != (uint8_t)shown_s))
-          {
-            Update_LCD_Debug(pot_percent, distance_mm);
-            shown_s = pot_percent;
-            shown_cm = cm;
-            shown_state = state;
-          }
-        }
-        else if ((state == ST_LIVE) && (pot_mode == MODE_STANDARD_LCD))
+        if (state == ST_LIVE)
         {
           /* Line0 distance like old pot Standard; line1 countdown when second ticks. */
           if (cm != shown_cm)

@@ -55,7 +55,7 @@
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
-
+extern UART_HandleTypeDef huart2;
 /* USER CODE BEGIN EV */
 void TIM7_TickHandler(void);   /* HAL time base, see stm32l4xx_hal_timebase_tim.c */
 /* USER CODE END EV */
@@ -183,8 +183,14 @@ void PendSV_Handler(void)
 void SysTick_Handler(void)
 {
   /* USER CODE BEGIN SysTick_IRQn 0 */
-  /* Tick comes from TIM7 now, so SysTick stays disabled and does not wake __WFI. */
+  /*
+   * The HAL_IncTick() below is dead code and is left in place only so this file
+   * matches what CubeMX generates. TIM7 owns the tick: HAL_InitTick() in
+   * stm32l4xx_hal_timebase_tim.c clears SysTick TICKINT and ENABLE, and nothing
+   * re-enables them, so SysTick never fires and never wakes the CPU from __WFI.
+   */
   /* USER CODE END SysTick_IRQn 0 */
+  HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
 
   /* USER CODE END SysTick_IRQn 1 */
@@ -209,6 +215,20 @@ void EXTI0_IRQHandler(void)
   /* USER CODE BEGIN EXTI0_IRQn 1 */
 
   /* USER CODE END EXTI0_IRQn 1 */
+}
+
+/**
+  * @brief This function handles USART2 global interrupt.
+  */
+void USART2_IRQHandler(void)
+{
+  /* USER CODE BEGIN USART2_IRQn 0 */
+
+  /* USER CODE END USART2_IRQn 0 */
+  HAL_UART_IRQHandler(&huart2);
+  /* USER CODE BEGIN USART2_IRQn 1 */
+
+  /* USER CODE END USART2_IRQn 1 */
 }
 
 /* USER CODE BEGIN 1 */

@@ -94,6 +94,23 @@ In parallel with the SW1 presentation flow, the potentiometer (PA7 / ADC1_IN12) 
 |-----------|------|-----------|
 | 0–33% | UART TEST | Throttled VCP prints of pot% + distance while Live/Hold |
 | 34–66% | STANDARD | Presentation LCD UI (System Ready / Dist / HOLD / On: Ns) |
-| 67–100% | LCD DEBUG | `Update_LCD_Debug` (pot% + mm) while Live/Hold |
+| 67–100% | LCD DEBUG | UART text entry: type on the VCP, press Enter, the line appears on the LCD |
 
 SW1 Ready/Live/Hold/Sleep behaviour is unchanged in all pot ranges.
+
+### LCD DEBUG: writing to the display over UART
+
+In this range the LCD becomes a terminal display. Row 1 shows the fixed hint
+`Type UART 115200`; row 2 shows the last line sent with Enter.
+
+Open the ST-Link VCP at 115200 8N1 and type. Characters are echoed back to the
+terminal while the line is being composed, backspace deletes, and Enter commits
+up to 16 characters to the LCD. Sending an empty Enter clears the row. Typing
+counts as user activity, so the 30 s idle sleep will not cut off a line
+mid-composition.
+
+Reception is interrupt driven into a 64-byte ring buffer. USART2 has no receive
+FIFO, so at 115200 baud a byte must be taken within roughly 87 us — far shorter
+than the up to 100 ms the main loop spends asleep in `HAL_TickSleep()`. Polling
+would drop nearly every keystroke. The same ring also feeds the lab `'1'` /
+`'2'` distance keys used when the ToF sensor is unplugged.
